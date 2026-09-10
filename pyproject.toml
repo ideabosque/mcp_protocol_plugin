@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-protocol-plugin"
+version = "0.0.1"
+description = "MCP Protocol Plugin for SilvaEngine Daemon"
+requires-python = ">=3.10"
+dependencies = [
+  "silvaengine-daemon>=0.0.1",
+  "mcp>=2.0,<3.0",
+  "python-jose[cryptography]",
+  "httpx[http2]",
+  "bcrypt",
+  "passlib[bcrypt]",
+  "graphene",
+  "python-dotenv",
+  "pendulum",
+  "silvaengine-dynamodb-base",
+  "silvaengine-utility",
+  "mcp-http-client",
+  "aiohttp",
+]
+
+[project.optional-dependencies]
+postgresql = ["SQLAlchemy>=1.4", "psycopg2-binary>=2.9", "alembic>=1.10"]
+dev = ["ruff", "pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+include = ["mcp_protocol_plugin*"]
