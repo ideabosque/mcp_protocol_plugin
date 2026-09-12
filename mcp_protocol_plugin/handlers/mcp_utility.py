@@ -521,18 +521,44 @@ def _import_module_from_extract_path(module_name: str) -> ModuleType:
 def _import_git_module(
     module_name: str,
     module_setting: Dict[str, Any] = None,
+    partition_key: str = None,
 ) -> ModuleType:
     """Import a Git-installed MCP module from its commit-scoped install target.
 
     The ``install_target`` is read from ``module_setting`` (stored in
     ``MCPSetting.setting`` during ``installMcpPackageFromGit``).
 
-    If the install target is missing and ``git_refresh_policy`` is
-    ``on_runtime_miss``, a reinstall is attempted using persisted Git metadata.
-    Otherwise the missing target is a hard error.
+    Depending on ``Config.git_refresh_policy`` (see handlers.config), this
+    tool invocation itself may trigger an install or refresh via
+    ``mcp_git.ensure_git_module_current`` before importing:
+
+    - ``on_runtime_miss``: only when ``install_target`` is missing/invalid
+      on this host — reinstalls from the persisted git_url/git_ref.
+    - ``on_runtime_check``: always attempted, but internally TTL-gated
+      (``git_refresh_ttl``) so it's a cheap local check most of the time,
+      only hitting the remote and reinstalling when the repo has changed.
+
+    Both are best-effort: a failed check/refresh is logged and this falls
+    through to whatever ``install_target`` is already recorded (which may
+    still be missing, in which case the import below raises ImportError).
     """
     setting = module_setting or {}
     install_target = setting.get("install_target", "")
+    policy = Config.git_refresh_policy
+
+    needs_runtime_check = policy == "on_runtime_check" or (
+        policy == "on_runtime_miss"
+        and (not install_target or not os.path.isdir(install_target))
+    )
+    if needs_runtime_check and partition_key:
+        from .mcp_git import ensure_git_module_current
+
+        refreshed_setting = ensure_git_module_current(
+            module_name, partition_key, Config.logger
+        )
+        if refreshed_setting:
+            setting = refreshed_setting
+            install_target = setting.get("install_target", "")
 
     if not install_target:
         raise ImportError(
@@ -541,25 +567,12 @@ def _import_git_module(
         )
 
     if not os.path.isdir(install_target):
-        if Config.git_refresh_policy == "on_runtime_miss":
-            # Auto-reinstall from persisted Git metadata is planned but not
-            # callable from the runtime path yet (refresh requires a
-            # ResolveInfo context that runtime imports do not have).
-            # Fail with a clear message pointing at the admin mutation.
-            Config.logger.warning(
-                f"Git install target missing for '{module_name}': "
-                f"{install_target} (git_refresh_policy=on_runtime_miss)."
-            )
         raise ImportError(
             f"Git install target missing for '{module_name}': "
             f"{install_target}. "
             f"Run refreshMcpGitPackage or installMcpPackageFromGit "
-            f"to reinstall."
-        )
-        raise ImportError(
-            f"Git install target missing for '{module_name}': "
-            f"{install_target}. "
-            f"Run installMcpPackageFromGit to install."
+            f"to reinstall (or set git_refresh_policy to on_runtime_miss "
+            f"/ on_runtime_check to have a tool call do this automatically)."
         )
 
     # Insert the install target into sys.path and import
@@ -618,6 +631,7 @@ def _get_module(
     module_name: str,
     source: str = None,
     module_setting: Dict[str, Any] = None,
+    partition_key: str = None,
 ) -> ModuleType:
     """Get the module object for the given source.
 
@@ -626,6 +640,10 @@ def _get_module(
         ``git``       → import from commit-scoped ``install_target``.
         ``s3``        → legacy ZIP download/extract from S3.
         ``local``/````/``None`` → direct ``importlib`` import from daemon sys.path.
+
+    ``partition_key`` is only used by the ``git`` source, to look up (and,
+    per ``Config.git_refresh_policy``, auto-refresh) that module's Git
+    install metadata — see ``_import_git_module``.
     """
     try:
         source_key = (source or "local").lower()
@@ -636,7 +654,7 @@ def _get_module(
             return module
 
         if source_key == "git":
-            return _import_git_module(module_name, module_setting)
+            return _import_git_module(module_name, module_setting, partition_key)
 
         if source_key == "s3":
             return _import_s3_module(package_name, module_name)
@@ -655,6 +673,7 @@ def _get_class(
     class_name: str,
     source: str = None,
     module_setting: Dict[str, Any] = None,
+    partition_key: str = None,
 ) -> Optional[type]:
     try:
         # Import the module and get the class
@@ -663,6 +682,7 @@ def _get_class(
             module_name,
             source=source,
             module_setting=module_setting,
+            partition_key=partition_key,
         )
         return getattr(module, class_name)
     except Exception as e:
@@ -790,6 +810,7 @@ def execute_tool_function(
             module["class_name"],
             source=module.get("source"),
             module_setting=module.get("setting"),
+            partition_key=partition_key,
         )
 
         if tool_class is None:
@@ -955,6 +976,7 @@ def execute_resource_function(
             module["class_name"],
             source=module.get("source"),
             module_setting=module.get("setting"),
+            partition_key=partition_key,
         )
 
         if resource_class is None:
@@ -1037,6 +1059,7 @@ def execute_prompt_function(
             module["class_name"],
             source=module.get("source"),
             module_setting=module.get("setting"),
+            partition_key=partition_key,
         )
 
         if prompt_class is None:

@@ -220,6 +220,26 @@ def load_mcp_configuration_into_models(
                     {"class_name": module.get("class_name"), "setting_id": setting_id}
                 ]
 
+                # "source" ("git" / "external" / "s3" / "") drives which import
+                # strategy the runtime tool-dispatch path uses for this module
+                # (see mcp_utility._get_module) — silently resetting it to ""
+                # here breaks dispatch for an already-git-installed module the
+                # next time any tool on it is invoked. Neither a plugin's own
+                # manifest (mcp_skill_provider's ships "source": "" as a
+                # placeholder, expecting installMcpPackageFromGit's "git" to
+                # win) nor a caller like loadMcpConfiguration's --reload-mcp
+                # path (which doesn't pass source at all, since it's meant to
+                # reload config, not reclassify the module) reliably supplies
+                # a real value — so preserve whatever is already persisted
+                # for this module instead of defaulting to "".
+                source = module.get("source") or kwargs.get("source")
+                if not source:
+                    existing_module = get_repo("mcp_module").get(
+                        partition_key=partition_key,
+                        module_name=module.get("module_name"),
+                    )
+                    source = (existing_module or {}).get("source") or ""
+
                 module_data = {
                     "partition_key": partition_key,
                     "module_name": module.get("module_name"),
@@ -227,7 +247,7 @@ def load_mcp_configuration_into_models(
                         "package_name", module.get("module_name")
                     ),
                     "classes": classes,
-                    "source": module.get("source") or kwargs.get("source", ""),
+                    "source": source,
                     "updated_by": updated_by,
                 }
                 get_repo("mcp_module").insert_update(info, **module_data)

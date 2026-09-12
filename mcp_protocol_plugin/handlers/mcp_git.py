@@ -833,7 +833,15 @@ def install_mcp_package_from_git(
             force_refresh=False,
             expected_target=expected_target,
         ):
-            # No-op: local install is current.
+            # No-op: local install is current. Still record the check so
+            # TTL-gated callers (check_mcp_git_package_version, and the
+            # runtime auto-refresh in ensure_git_module_current) see a fresh
+            # last_checked_at — otherwise a module that's only ever refreshed
+            # via this no-op path would look permanently "never checked" and
+            # every runtime call would re-hit the remote.
+            _update_check_metadata(
+                info, partition_key, module_name, remote_commit, logger
+            )
             logger.info(
                 f"Git module '{module_name}' is up to date "
                 f"(commit={remote_commit[:12]}). No-op."
@@ -1236,8 +1244,124 @@ def _update_check_metadata(
         )
 
 
+# ---------------------------------------------------------------------------
+# Runtime auto-install / auto-refresh (called from the tool-dispatch path,
+# which has no GraphQL ResolveInfo — see mcp_utility._import_git_module)
+# ---------------------------------------------------------------------------
+
+
+class _RuntimeResolveInfo:
+    """Minimal stand-in for graphene's ``ResolveInfo``.
+
+    Every function in this module that takes ``info: ResolveInfo`` only ever
+    reads ``info.context.get(...)`` (partition_key, logger) — never a real
+    GraphQL attribute (field_name, path, return_type, ...). The tool-dispatch
+    path (``execute_tool_function`` and friends) has no ResolveInfo at all,
+    only a bare ``partition_key`` string, so this shim reproduces just the
+    ``.context`` surface those functions actually touch.
+    """
+
+    __slots__ = ("context",)
+
+    def __init__(self, partition_key: str, logger: Any) -> None:
+        self.context = {"partition_key": partition_key, "logger": logger}
+
+
+def ensure_git_module_current(
+    module_name: str,
+    partition_key: str,
+    logger: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Best-effort, TTL-gated auto-install/auto-refresh for a Git module.
+
+    Called from the runtime tool-dispatch path (``mcp_utility._import_git_module``)
+    when ``Config.git_refresh_policy`` is ``on_runtime_miss`` or
+    ``on_runtime_check`` — the two policies where a tool invocation, not an
+    admin GraphQL mutation, is what should trigger install/refresh:
+
+    - ``on_runtime_miss``: only when the module's ``install_target`` is
+      missing on this host (e.g. a fresh container, or GIT_INSTALL_PATH was
+      cleared) — reinstalls from the persisted git_url/git_ref, no remote
+      check otherwise.
+    - ``on_runtime_check``: on every invocation, subject to
+      ``check_mcp_git_package_version``'s own TTL gate (``git_refresh_ttl``,
+      default 1h) — so the repo is checked for new commits periodically
+      without a remote round-trip on every single call, and refreshed
+      automatically when it has changed.
+
+    Reuses ``check_mcp_git_package_version``/``refresh_mcp_git_package``
+    exactly as the admin ``checkMcpGitPackageVersion``/``refreshMcpGitPackage``
+    mutations do, via a synthetic ``ResolveInfo`` (see ``_RuntimeResolveInfo``)
+    — so this is the same, already-exercised install/refresh code path, not
+    a parallel implementation.
+
+    Never raises: a failed check or refresh (remote unreachable, bad
+    credentials, ...) is logged and swallowed, leaving whatever is already
+    on disk (if anything) for the caller to try importing — a transient git
+    hiccup should not take down every tool call for a module that was
+    working fine a moment ago. Returns the module's current setting dict
+    (re-read after any refresh) so the caller can pick up a possibly-new
+    ``install_target``, or ``None`` if the module has no Git metadata at all.
+    """
+    log = logger or Config.logger
+    info = _RuntimeResolveInfo(partition_key, log)
+
+    local_state = _read_existing_module_setting(partition_key, module_name, log)
+    if not local_state or not local_state.get("git_url"):
+        return None
+
+    install_target = local_state.get("install_target", "")
+    target_missing = not install_target or not os.path.isdir(install_target)
+
+    if target_missing:
+        # The local install_target is gone (fresh container, cleared
+        # GIT_INSTALL_PATH, ...) — this alone means "reinstall now", full
+        # stop. Do NOT route this through check_mcp_git_package_version:
+        # that function only compares commits and is TTL-gated, so within
+        # git_refresh_ttl of the last check it reports needs_refresh=False
+        # regardless of whether install_target is even present on disk —
+        # it was never meant to detect "the files are just gone", only "is
+        # there a newer commit upstream". Going straight to
+        # refresh_mcp_git_package is safe: install_mcp_package_from_git's
+        # own _needs_refresh() independently checks os.path.isdir(install_target)
+        # and treats a missing target as needing (re)install regardless of TTL.
+        needs_refresh = True
+    else:
+        try:
+            status = check_mcp_git_package_version(
+                info, module_name=module_name, force_check=False
+            )
+            needs_refresh = bool(status.get("needs_refresh"))
+        except Exception as e:
+            log.warning(
+                f"Runtime Git version check failed for '{module_name}': {e}. "
+                f"Using existing install, if any."
+            )
+            return local_state
+
+    if not needs_refresh:
+        return local_state
+
+    try:
+        refresh_mcp_git_package(
+            info,
+            module_name=module_name,
+            updated_by="mcp-runtime-auto-refresh",
+            force_refresh=False,
+        )
+    except Exception as e:
+        log.warning(
+            f"Runtime Git auto-refresh failed for '{module_name}': {e}. "
+            f"Using existing install, if any."
+        )
+        return local_state
+
+    return _read_existing_module_setting(partition_key, module_name, log)
+
+
 __all__ = [
     "install_mcp_package_from_git",
     "check_mcp_git_package_version",
     "refresh_mcp_git_package",
+    "ensure_git_module_current",
 ]

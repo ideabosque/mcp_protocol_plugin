@@ -244,7 +244,15 @@ class Config:
     git_token: str | None = None
     git_ssh_key: str | None = None
     git_require_ref: bool = True
-    git_refresh_policy: str = "manual"  # manual | on_startup | on_runtime_miss
+    # manual           -> only installMcpPackageFromGit/refreshMcpGitPackage (admin) touch it
+    # on_startup       -> (reserved; not yet wired to a startup hook)
+    # on_runtime_miss  -> a tool invocation auto-(re)installs when install_target
+    #                     is missing on this host, using the persisted git_url/
+    #                     git_ref; no periodic remote check otherwise
+    # on_runtime_check -> on_runtime_miss, plus every invocation does a
+    #                     TTL-gated (git_refresh_ttl) remote check and
+    #                     auto-refreshes when the repo has a new commit
+    git_refresh_policy: str = "manual"
     git_refresh_ttl: int = 3600
     git_version_strategy: str = "ref"  # ref | latest_tag | package_version
     git_tag_pattern: str | None = None
