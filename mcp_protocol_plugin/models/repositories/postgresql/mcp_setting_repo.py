@@ -149,7 +149,7 @@ class MCPSettingPGRepository(EntityRepository):
 
             session.commit()
             session.refresh(row)
-            result = normalize_row(row)
+            result = self.get_type(info, row)
 
             # Purge cache after successful commit
             self._purge_cache(info, partition_key, setting_id)

@@ -145,7 +145,7 @@ class MCPModulePGRepository(EntityRepository):
 
             session.commit()
             session.refresh(row)
-            result = normalize_row(row)
+            result = self.get_type(info, row)
 
             # Purge cache after successful commit — mcp_module plus
             # cascaded mcp_setting caches for any setting_ids in classes.
