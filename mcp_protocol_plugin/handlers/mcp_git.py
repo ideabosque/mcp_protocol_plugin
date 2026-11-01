@@ -64,6 +64,13 @@ _GIT_METADATA_KEYS = [
     "installed_at",
 ]
 
+def _strip_git_metadata(variables: Any) -> Any:
+    """Drop installer-owned git metadata keys from caller-supplied variables."""
+    if not isinstance(variables, dict):
+        return variables
+    return {k: v for k, v in variables.items() if k not in _GIT_METADATA_KEYS}
+
+
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHORT_COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
 
@@ -790,6 +797,12 @@ def install_mcp_package_from_git(
     module_name = kwargs["module_name"]
     package_name = kwargs["package_name"]
     variables = kwargs.get("variables")
+    # Install metadata is owned by this installer. Callers often pass the
+    # module's existing setting back as variables (to keep its business
+    # settings); its old git metadata (install_target, resolved_commit, ...)
+    # must not override the fresh values, or the setting would point at the
+    # previous install target that is cleaned up below.
+    variables = _strip_git_metadata(variables)
     updated_by = kwargs["updated_by"]
 
     # --- Validate inputs ---
