@@ -180,13 +180,20 @@ class MCPProtocolPlugin(Graphql):
 
     def mcp(self, **params: Dict[str, Any]) -> Any:
         """Process one MCP JSON-RPC message."""
+        from .handlers.caller_context import (
+            bearer_from_headers,
+            with_caller_authorization,
+        )
         from .handlers.mcp_server import process_mcp_message
 
         self._apply_partition_defaults(params)
         message = self._extract_json_rpc_message(params)
 
         result = Invoker.sync_call_async_compatible(
-            process_mcp_message(params.get("partition_key", ""), message)
+            with_caller_authorization(
+                bearer_from_headers(params.get("headers")),
+                process_mcp_message(params.get("partition_key", ""), message),
+            )
         )
         return self._unwrap_gateway_result(result)
 

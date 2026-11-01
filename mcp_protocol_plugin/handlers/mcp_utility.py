@@ -6,6 +6,7 @@ __author__ = "bibow"
 
 import asyncio
 import concurrent.futures
+import contextvars
 import functools
 import importlib
 import importlib.util
@@ -31,6 +32,7 @@ from mcp.types import (
 
 from silvaengine_utility import Invoker, Serializer
 
+from .caller_context import CALLER_AUTHORIZATION
 from .config import Config
 
 # Global registry to track active background threads
@@ -830,6 +832,11 @@ def execute_tool_function(
                 tool_obj.endpoint_id = partition_key
                 tool_obj.part_id = None
 
+        # Per-call caller credential for modules that forward it downstream
+        # (opt-in attribute, like endpoint_id/part_id); never persisted.
+        if hasattr(tool_obj, "caller_authorization"):
+            tool_obj.caller_authorization = CALLER_AUTHORIZATION.get()
+
         if module.get("source") == "external":
             tool_obj._mcp_function_name = name
 
@@ -1172,9 +1179,11 @@ def async_execute_tool_function(
         )
     else:
         Config.logger.info("Dispatching execute_tool_function in a separate thread")
+        # Carry the caller credential (context variables) into the worker thread.
         thread = threading.Thread(
-            target=execute_tool_function,
+            target=contextvars.copy_context().run,
             args=(
+                execute_tool_function,
                 partition_key,
                 name,
                 arguments,
